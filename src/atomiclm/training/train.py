@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 
 from ..model.decoder import Decoder
 from ..tokenizer.tokenizer import BasicTokenizer
+from ..utils import format_eta
 from .config import TrainingConfig
 from .checkpoint import save_checkpoint, load_checkpoint, find_latest_checkpoint
 
@@ -321,7 +322,7 @@ class Trainer:
         if tokens_per_sec is not None:
             parts.append(f"{tokens_per_sec:,.0f} tok/s")
         if eta_sec is not None:
-            parts.append(f"ETA {_format_eta(eta_sec)}")
+            parts.append(f"ETA {format_eta(eta_sec)}")
         print(" | ".join(parts))
 
         # Append to CSV
@@ -333,20 +334,6 @@ class Trainer:
                 f"{lr if lr is not None else ''},"
                 f"{tokens_per_sec if tokens_per_sec is not None else ''}\n"
             )
-
-
-# ── Helpers ──────────────────────────────────────────────────────────
-
-
-def _format_eta(seconds: float) -> str:
-    seconds = int(seconds)
-    h, rem = divmod(seconds, 3600)
-    m, s = divmod(rem, 60)
-    if h > 0:
-        return f"{h}h {m:02d}m"
-    if m > 0:
-        return f"{m}m {s:02d}s"
-    return f"{s}s"
 
 
 # ── Learning Rate Schedules ──────────────────────────────────────────

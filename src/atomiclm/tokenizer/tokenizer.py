@@ -1,13 +1,14 @@
 from collections import defaultdict
-import json
 import heapq
+import json
+import time
 import regex as re
-
 
 from .base import Tokenizer
 from .constants import TOKENIZER_BASE_LENGTH, TOKENIZER_VERSION
 from .patterns import GPT4_SPLIT_PATTERN
 from .bpe_ops import merge, get_stats
+from ..utils import format_eta
 
 
 class BasicTokenizer(Tokenizer):
@@ -113,6 +114,9 @@ class BasicTokenizer(Tokenizer):
         heapq.heapify(heap)
 
         merges_done = 0
+        t_start = time.time()
+        print_every = max(1, num_merges // 20)
+        w = len(str(num_merges))
         while merges_done < num_merges and heap:
             while heap:
                 neg_freq, _, pair = heapq.heappop(heap)
@@ -138,8 +142,17 @@ class BasicTokenizer(Tokenizer):
             token_bytes[new_id] = new_bytes
             bytes_to_id[new_bytes] = new_id
 
-            if verbose:
-                print(f"[{merges_done}] merge {pair} -> {new_id}")
+            if verbose and (merges_done % print_every == 0 or merges_done == num_merges):
+                elapsed = time.time() - t_start
+                rate = merges_done / elapsed if elapsed > 0 else 0
+                remaining = (num_merges - merges_done) / rate if rate > 0 else 0
+                pct = 100.0 * merges_done / num_merges
+                end = "\n" if merges_done == num_merges else ""
+                print(
+                    f"\r  [{merges_done:{w}d}/{num_merges}] {pct:5.1f}%"
+                    f" | {rate:6.0f} merges/s | ETA {format_eta(remaining):<8s}",
+                    end=end, flush=True,
+                )
 
             # Sort by position descending so merging at later positions
             # doesn't shift earlier ones within the same sequence.
@@ -197,6 +210,9 @@ class BasicTokenizer(Tokenizer):
         self.merges = {}
         self.merge_ranks = {}
 
+        t_start = time.time()
+        print_every = max(1, num_merges // 20)
+        w = len(str(num_merges))
         for i in range(num_merges):
             stats = {}
             for seq in ids:
@@ -212,8 +228,18 @@ class BasicTokenizer(Tokenizer):
             self.merges[pair] = idx
             self.merge_ranks[pair] = i
 
-            if verbose:
-                print(f"merging {pair} -> {idx}")
+            done = i + 1
+            if verbose and (done % print_every == 0 or done == num_merges):
+                elapsed = time.time() - t_start
+                rate = done / elapsed if elapsed > 0 else 0
+                remaining = (num_merges - done) / rate if rate > 0 else 0
+                pct = 100.0 * done / num_merges
+                end = "\n" if done == num_merges else ""
+                print(
+                    f"\r  [{done:{w}d}/{num_merges}] {pct:5.1f}%"
+                    f" | {rate:6.0f} merges/s | ETA {format_eta(remaining):<8s}",
+                    end=end, flush=True,
+                )
 
         self.vocab = self._build_vocab()
 

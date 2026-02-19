@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+r"""
 Script to train a BPE tokenizer.
 
 Usage:
@@ -9,9 +9,19 @@ Usage:
 """
 
 import argparse
+import os
+import time
 from pathlib import Path
 
 from atomiclm.tokenizer.tokenizer import BasicTokenizer
+
+
+def _format_size(n_bytes: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n_bytes < 1024:
+            return f"{n_bytes:.1f} {unit}"
+        n_bytes /= 1024
+    return f"{n_bytes:.1f} TB"
 
 
 def read_chunks(file_path, chunk_size=1024 * 1024):
@@ -35,7 +45,7 @@ def main():
                         help="Regex pattern for text splitting (defaults to GPT-4 pattern)")
     parser.add_argument("--method", choices=["heap", "basic"], default="heap",
                         help="Training method: heap (O(n log n), default) or basic (O(n²))")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Print merge info during training")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress training progress output")
     args = parser.parse_args()
 
     # Default output path
@@ -43,21 +53,28 @@ def main():
         data_stem = Path(args.data).stem
         args.output = f"out/tokenizer-{data_stem}-{args.vocab_size}"
 
-    print(f"Training tokenizer on {args.data}")
-    print(f"Target vocab size: {args.vocab_size}")
-    print(f"Training method: {args.method}")
-    if args.pattern:
-        print(f"Custom pattern: {args.pattern}")
+    num_merges = args.vocab_size - 256
+    file_size = os.path.getsize(args.data)
+    verbose = not args.quiet
 
-    # Train tokenizer using iterator (handles large files, consistent chunk boundaries)
+    print(f"Data:         {args.data}  ({_format_size(file_size)})")
+    print(f"Target vocab: {args.vocab_size}  ({num_merges} merges)")
+    print(f"Method:       {args.method}")
+    if args.pattern:
+        print(f"Pattern:      {args.pattern}")
+    print("-" * 60)
+
     tokenizer = BasicTokenizer(pattern=args.pattern)
     method = None if args.method == "heap" else "basic"
+
+    t0 = time.time()
     tokenizer.train_from_iterator(
         read_chunks(args.data),
         vocab_size=args.vocab_size,
-        verbose=args.verbose,
+        verbose=verbose,
         method=method,
     )
+    elapsed = time.time() - t0
 
     # Register special tokens if provided
     if args.special:
@@ -67,14 +84,15 @@ def main():
             special_tokens[token] = next_id
             next_id += 1
         tokenizer.register_special_tokens(special_tokens)
-        print(f"Registered special tokens: {list(special_tokens.keys())}")
 
-    # Save (note: .json extension added automatically)
-    print(f"\nSaving to {args.output}.json")
+    # Save
+    print("-" * 60)
+    print(f"Saving to {args.output}.json")
     tokenizer.save(args.output)
-    print(f"Final vocab size: {len(tokenizer.vocab)}")
+
+    print(f"Done.  Vocab: {len(tokenizer.vocab)}  |  {elapsed:.1f}s  ({num_merges / elapsed:.0f} merges/s)")
     if tokenizer.special_tokens:
-        print(f"Special tokens: {len(tokenizer.special_tokens)}")
+        print(f"Special tokens: {list(tokenizer.special_tokens.keys())}")
 
 
 if __name__ == "__main__":
