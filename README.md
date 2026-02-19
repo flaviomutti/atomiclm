@@ -1,44 +1,65 @@
-# AtomicLM
+# ⚡ AtomicLM
 
-From-scratch implementation of a decoder-only transformer language model in Python/PyTorch. Every component is written explicitly — no HuggingFace wrappers, no pre-built transformer layers.
+From-scratch decoder-only transformer in Python/PyTorch. No `.from_pretrained()`, no framework wrappers, no mystery layers — every component written explicitly and meant to be read.
 
-The codebase covers three stages: training a BPE tokenizer on your own data, pretraining a transformer model, and generating text from a checkpoint. Trained tokenizers can be exported to tiktoken for fast inference.
+Train a BPE tokenizer → pretrain a transformer → generate text. That's the whole pipeline.
 
-## Requirements
+## 🧠 About
 
-- Python >= 3.12
-- [uv](https://docs.astral.sh/uv/)
+AtomicLM is a learning-first codebase. The goal isn't a competitive model — it's a codebase where you can trace every operation, understand every gradient, and learn by breaking things.
 
-## Setup
+- **🔍 No black boxes.** Any failure traces to a specific line. If you can't follow the code, that's a bug in the code.
+- **📖 Readable over clever.** Ten explicit lines beat one cryptic abstraction.
+- **🪶 Minimal footprint.** PyTorch and a regex library. Nothing else at runtime.
+- **🆓 Free and open-source.** MIT — use it, fork it, publish papers with it.
+
+## ⚙️ Requirements
+
+- Python ≥ 3.12
+- [uv](https://docs.astral.sh/uv/) — if you don't have it: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+## 🚀 Quickstart
 
 ```bash
-# git clone https://github.com/flaviomutti/atomiclm.git
-cd atomiclm
-uv sync
+git clone https://github.com/flaviomutti/atomiclm.git
+cd atomiclm && uv sync
+
+# 1. Train a BPE tokenizer on your corpus
+uv run python scripts/train_tokenizer.py data/corpus.txt 512
+
+# 2. Pretrain — write a config.json first (see Usage below)
+uv run python scripts/pretrain.py config.json
+
+# 3. Generate
+uv run python scripts/generate.py checkpoints/run/checkpoint_latest.pt "The answer is" 50
 ```
 
-## Usage
+## 🛠️ Usage
 
-### 1. Train a tokenizer
+### 🔤 Tokenizer
 
-Point the script at any UTF-8 text file and choose a target vocabulary size:
+Train a BPE tokenizer on any UTF-8 text file. Pick vocabulary size based on corpus size — 512 for small experiments, 32k+ for real data.
 
 ```bash
 uv run python scripts/train_tokenizer.py data/corpus.txt 512 --output out/tokenizer-512
 ```
 
-You can add special tokens and choose between the default heap-based training (O(n log n)) or the simpler quadratic method:
+Optional flags:
 
 ```bash
-uv run python scripts/train_tokenizer.py data/corpus.txt 1024 --special "<|endoftext|>" "<|pad|>"
+# Register special tokens (they bypass BPE and get reserved IDs)
+uv run python scripts/train_tokenizer.py data/corpus.txt 1024 \
+    --special "<|endoftext|>" "<|pad|>"
+
+# Swap to the simpler O(n²) algorithm — useful for debugging or tiny corpora
 uv run python scripts/train_tokenizer.py data/corpus.txt 1024 --method basic
 ```
 
-The tokenizer saves as JSON and can be reloaded without retraining.
+Output is a JSON file — merges stored as `[left, right, id]` triples, human-readable, reloadable without retraining.
 
-### 1b. Export to tiktoken
+### 📦 Export to tiktoken
 
-`export_mergeable_ranks()` yields `(bytes, rank)` pairs in the format tiktoken expects. After wrapping, `enc` is a drop-in replacement for any tiktoken encoding backed by a compiled Rust extension.
+The trained tokenizer can wrap as a tiktoken `Encoding` — useful for fast inference or dropping into pipelines that already expect tiktoken's API.
 
 ```bash
 uv sync --extra tiktoken
@@ -58,14 +79,14 @@ enc = tiktoken.Encoding(
     special_tokens=tokenizer.special_tokens,
 )
 
-enc.encode('hello world')  # same output as tokenizer.encode('hello world')
+enc.encode('hello world')  # identical output to tokenizer.encode('hello world')
 ```
 
-See `notebooks/tokenizer_tiktoken.ipynb` for a full walkthrough including a correctness check.
+See `notebooks/tokenizer_tiktoken.ipynb` for a roundtrip correctness check.
 
-### 2. Pretrain a model
+### 🏋️ Pretrain
 
-Create a JSON config file. All fields and their defaults are in `src/atomiclm/training/config.py`.
+Write a JSON config. All available fields and defaults live in `src/atomiclm/training/config.py` — it's short, read it.
 
 ```json
 {
@@ -73,9 +94,9 @@ Create a JSON config file. All fields and their defaults are in `src/atomiclm/tr
         "d_model": 128,
         "num_layers": 4,
         "num_heads": 4,
+        "num_kv_heads": 2,
         "d_ff": 512,
         "max_seq_len": 256,
-        "num_kv_heads": 2,
         "use_gated_ffn": true
     },
     "data": {
@@ -86,38 +107,73 @@ Create a JSON config file. All fields and their defaults are in `src/atomiclm/tr
     "optim": {
         "lr": 3e-4,
         "num_epochs": 10,
-        "batch_size": 32
+        "batch_size": 32,
+        "grad_accum_steps": 4
     }
 }
 ```
 
 ```bash
 uv run python scripts/pretrain.py local/config.json
+
+# Resume from a checkpoint (restores model, optimizer, and RNG state)
 uv run python scripts/pretrain.py local/config.json --resume checkpoints/run/checkpoint_latest.pt
 ```
 
-### 3. Generate text
+`grad_accum_steps` lets you simulate a larger effective batch without extra GPU memory — 4 micro-batches × 32 = effective batch of 128, same gradient as if you fit all 128 in one shot.
+
+### ✍️ Generate
 
 ```bash
+# checkpoint path, prompt string, max new tokens
 uv run python scripts/generate.py checkpoints/run/checkpoint_latest.pt "The answer is" 50
-uv run python scripts/generate.py checkpoints/run/checkpoint_latest.pt "Hello" 30 --temperature 0.8 --top-k 40
+
+# dial in randomness
+uv run python scripts/generate.py checkpoints/run/checkpoint_latest.pt "Hello" 100 \
+    --temperature 0.8 --top-k 40
 ```
 
-## What's Inside
+`--temperature` scales the logit distribution before sampling (lower = greedier, higher = more chaotic). `--top-k` restricts sampling to the k highest-probability tokens.
 
-### Tokenizer (`src/atomiclm/tokenizer/`)
+## 🔬 Architecture
 
-BPE tokenizer operating on raw bytes with GPT-4 regex pre-splitting. Supports iterator-based training for large files, special tokens, and JSON persistence.
+### 🔤 Tokenizer (`src/atomiclm/tokenizer/`)
 
-### Model (`src/atomiclm/model/`)
+Byte Pair Encoding on raw bytes (base vocab = 256 byte tokens). Uses GPT-4's regex pre-split pattern to chunk text before merging — same design as tiktoken, so the split boundary doesn't contaminate merge statistics. Training is O(n log n) via a heap that tracks pair positions for incremental updates.
 
-Decoder-only transformer following LLaMA-style design: Grouped Query Attention (configurable `num_kv_heads`), RoPE, RMSNorm, SwiGLU (optional), KV-cache, FlashAttention, and weight tying between embeddings and the LM head.
+Key files:
 
-### Training (`src/atomiclm/training/`)
+| File | What it does |
+|------|-------------|
+| `tokenizer.py` | `BasicTokenizer` — `train`, `encode`, `decode`, `save`, `load` |
+| `bpe_ops.py` | Low-level `merge()` and `get_stats()` primitives |
+| `patterns.py` | GPT-4 compatible Unicode-aware split regex |
 
-JSON config with nested dataclasses, AdamW with separate weight-decay groups, cosine LR with warmup, and checkpointing with full RNG state for reproducible resumption. Device auto-detection (cuda > mps > cpu).
+### 🤖 Model (`src/atomiclm/model/`)
 
-## Project Structure
+LLaMA-style decoder-only transformer:
+
+| Component | Details |
+|-----------|---------|
+| Attention | Multi-head + GQA (`num_kv_heads`), RoPE, KV-cache, FlashAttention via `F.scaled_dot_product_attention` |
+| FFN | GELU (default) or SwiGLU (`use_gated_ffn: true`) |
+| Norm | RMSNorm — pre-norm, no mean subtraction, no bias |
+| Positional | Rotary embeddings (complex-number rotation, LLaMA style) |
+| LM head | Weight-tied with the token embedding matrix |
+
+KV-cache is wired up in `Decoder.generate()` so autoregressive decoding doesn't recompute past keys and values.
+
+### 🏋️ Training (`src/atomiclm/training/`)
+
+| Feature | Implementation |
+|---------|---------------|
+| Config | Nested dataclasses from JSON; device auto-detected (cuda > mps > cpu) |
+| Optimizer | AdamW with separate weight-decay groups — residual projections decay, biases/norms don't |
+| Schedule | Cosine LR with linear warmup |
+| Gradient accumulation | `grad_accum_steps` micro-batches per optimizer step |
+| Checkpointing | Saves model + optimizer + RNG state — exact resumption, not approximate |
+
+## 🗂️ Project Structure
 
 ```
 src/atomiclm/
@@ -128,9 +184,9 @@ src/atomiclm/
         patterns.py         # GPT-4 regex split pattern
         constants.py        # Base vocab size, version
     model/
-        decoder.py          # Decoder (top-level LM)
+        decoder.py          # Decoder — top-level LM + generate()
         block.py            # TransformerBlock (pre-norm)
-        attention.py        # MultiHeadAttention (GQA, KV-cache)
+        attention.py        # MultiHeadAttention (GQA, KV-cache, FlashAttn)
         feedforward.py      # FeedForward (GELU / SwiGLU)
         norm.py             # RMSNorm
         rope.py             # RotaryEmbedding
@@ -140,26 +196,28 @@ src/atomiclm/
         train.py            # Trainer
         checkpoint.py       # Save/load checkpoints
 scripts/
-    train_tokenizer.py      # Train BPE tokenizer from text
-    pretrain.py             # Pretrain model from JSON config
-    generate.py             # Generate text from checkpoint
+    train_tokenizer.py      # CLI: train BPE tokenizer
+    pretrain.py             # CLI: pretrain model
+    generate.py             # CLI: generate from checkpoint
 ```
 
-## Notebooks
+## 📓 Notebooks
 
-| Notebook | Description |
-|----------|-------------|
-| `basic_tokenizer.ipynb` | BPE training, encoding/decoding, save/load |
-| `tokenizer_tiktoken.ipynb` | Export trained tokenizer to tiktoken; correctness check |
-| `tokenizer_special_tokens.ipynb` | Special token registration and encoding |
-| `rope_explained.ipynb` | RoPE: 2D rotations, complex implementation, relative position encoding |
-| `gqa_explained.ipynb` | GQA: MHA vs GQA vs MQA, KV-cache memory, repeat_kv |
+Good starting points if you want to understand one component before diving into the source:
 
-## Roadmap
+| Notebook | What you'll learn |
+|----------|------------------|
+| `basic_tokenizer.ipynb` | BPE from scratch: training, encoding, decoding, save/load |
+| `tokenizer_tiktoken.ipynb` | Export to tiktoken and verify identical output |
+| `tokenizer_special_tokens.ipynb` | How special tokens bypass BPE |
+| `rope_explained.ipynb` | RoPE: 2D rotations, complex numbers, relative positions |
+| `gqa_explained.ipynb` | GQA vs MHA vs MQA, KV-cache memory math, `repeat_kv` |
+
+## 🗺️ Roadmap
 
 See [TODO.md](TODO.md).
 
-## License
+## 📄 License
 
 [MIT](LICENSE)
 
