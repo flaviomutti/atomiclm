@@ -18,3 +18,7 @@ checkpoints/
 # Jupyter Notebook / Lab artifacts
 .ipynb_checkpoints/
 .jupyter/
+
+# Tools
+.claude/
+.pytest_cache/
