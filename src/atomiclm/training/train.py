@@ -113,15 +113,16 @@ class Trainer:
         else:
             raise ValueError(f"Unknown scheduler: {self.config.optim.scheduler}")
 
-    def train_step(self, batch: dict) -> float:
+    def _micro_step(self, batch: dict) -> float:
         """
-        Single training step: forward, loss, backward, clip, step.
+        Single micro-step: forward and backward only (no optimizer step).
+
+        Loss is scaled by 1/grad_accum_steps before backward so that
+        accumulated gradients average correctly across micro-batches.
 
         Returns:
-            Scalar loss value.
+            Unscaled loss value (for logging).
         """
-        self.model.train()
-
         input_ids = batch["input_ids"].to(self.device)
         target_ids = batch["target_ids"].to(self.device)
 
@@ -132,17 +133,8 @@ class Trainer:
             target_ids.view(-1),
         )
 
-        self.optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-
-        if self.config.optim.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(),
-                self.config.optim.grad_clip,
-            )
-
-        self.optimizer.step()
-        self.scheduler.step()
+        scaled_loss = loss / self.config.optim.grad_accum_steps
+        scaled_loss.backward()
 
         return loss.item()
 
@@ -182,7 +174,8 @@ class Trainer:
     def train(self) -> None:
         """Main training loop."""
         num_params = sum(p.numel() for p in self.model.parameters())
-        total_tokens = self.config.max_steps * self.config.data.batch_size * self.config.data.seq_len
+        grad_accum_steps = self.config.optim.grad_accum_steps
+        total_tokens = self.config.max_steps * self.config.data.batch_size * self.config.data.seq_len * grad_accum_steps
         print(f"Run: {self.config.run_name}")
         print(f"Device: {self.device}")
         print(f"Parameters: {num_params:,}")
@@ -224,23 +217,38 @@ class Trainer:
         loss_count = 0
 
         while self.global_step < self.config.max_steps:
-            # Get next batch (wrap around if exhausted)
-            try:
-                batch = next(train_iter)
-            except StopIteration:
-                train_iter = iter(self.train_loader)
-                batch = next(train_iter)
+            # Accumulate gradients over micro-batches
+            self.model.train()
+            self.optimizer.zero_grad(set_to_none=True)
+            micro_loss_sum = 0.0
 
-            loss = self.train_step(batch)
+            for _ in range(grad_accum_steps):
+                try:
+                    batch = next(train_iter)
+                except StopIteration:
+                    train_iter = iter(self.train_loader)
+                    batch = next(train_iter)
+
+                micro_loss_sum += self._micro_step(batch)
+
+            if self.config.optim.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.config.optim.grad_clip,
+                )
+
+            self.optimizer.step()
+            self.scheduler.step()
+
             self.global_step += 1
-            loss_accum += loss
+            loss_accum += micro_loss_sum / grad_accum_steps
             loss_count += 1
 
             # Logging
             if self.global_step % self.config.log_interval == 0:
                 elapsed = time.time() - step_start
                 steps_per_sec = self.config.log_interval / elapsed
-                tokens_per_sec = steps_per_sec * self.config.data.batch_size * self.config.data.seq_len
+                tokens_per_sec = steps_per_sec * self.config.data.batch_size * self.config.data.seq_len * grad_accum_steps
                 remaining_steps = self.config.max_steps - self.global_step
                 eta_sec = remaining_steps / steps_per_sec if steps_per_sec > 0 else 0
                 lr = self.scheduler.get_last_lr()[0]

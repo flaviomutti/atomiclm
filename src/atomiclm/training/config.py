@@ -77,6 +77,7 @@ class OptimConfig:
     weight_decay: float = 0.1
     betas: tuple = (0.9, 0.95)
     grad_clip: float = 1.0
+    grad_accum_steps: int = 1
     scheduler: str = "cosine"
     warmup_steps: int = 100
     min_lr_ratio: float = 0.1

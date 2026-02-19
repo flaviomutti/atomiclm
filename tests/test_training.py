@@ -263,7 +263,7 @@ def _make_trainer(tmp_path, tokenizer, model, val=False):
 def test_trainer_single_step(tmp_path, tokenizer, small_model):
     trainer = _make_trainer(tmp_path, tokenizer, small_model)
     batch = next(iter(trainer.train_loader))
-    loss = trainer.train_step(batch)
+    loss = trainer._micro_step(batch)
 
     assert isinstance(loss, float)
     assert loss > 0
@@ -303,6 +303,131 @@ def test_trainer_seq_len_exceeds_max_seq_len(tmp_path, tokenizer, small_model):
     train_loader, val_loader = create_dataloaders(config.data, tokenizer)
     with pytest.raises(ValueError, match="exceeds"):
         Trainer(config, small_model, tokenizer, train_loader, val_loader)
+
+
+# ── Gradient Accumulation Tests ──────────────────────────────────────
+
+
+def test_grad_accum_steps_default():
+    assert OptimConfig().grad_accum_steps == 1
+
+
+def test_grad_accum_steps_json_roundtrip(tmp_path):
+    config = TrainingConfig(optim=OptimConfig(grad_accum_steps=4))
+    path = str(tmp_path / "config.json")
+    config.to_json(path)
+    loaded = TrainingConfig.from_json(path)
+    assert loaded.optim.grad_accum_steps == 4
+
+
+def test_micro_step_scales_gradients(tmp_path, tokenizer, small_model):
+    """_micro_step divides loss by grad_accum_steps before backward."""
+    trainer = _make_trainer(tmp_path, tokenizer, small_model)
+    batch = next(iter(trainer.train_loader))
+
+    # grad_accum_steps=1 (default): gradients are unscaled
+    trainer.optimizer.zero_grad(set_to_none=True)
+    trainer._micro_step(batch)
+    grads_base = {
+        n: p.grad.clone()
+        for n, p in trainer.model.named_parameters()
+        if p.grad is not None
+    }
+
+    # grad_accum_steps=4: each micro-step contributes 1/4 of the gradient
+    trainer.config.optim.grad_accum_steps = 4
+    trainer.optimizer.zero_grad(set_to_none=True)
+    trainer._micro_step(batch)
+
+    for name, p in trainer.model.named_parameters():
+        if p.grad is not None:
+            torch.testing.assert_close(p.grad, grads_base[name] / 4)
+
+
+def test_micro_step_returns_unscaled_loss(tmp_path, tokenizer, small_model):
+    """_micro_step returns the unscaled loss regardless of grad_accum_steps."""
+    trainer = _make_trainer(tmp_path, tokenizer, small_model)
+    batch = next(iter(trainer.train_loader))
+
+    trainer.optimizer.zero_grad(set_to_none=True)
+    loss_1 = trainer._micro_step(batch)
+
+    trainer.config.optim.grad_accum_steps = 4
+    trainer.optimizer.zero_grad(set_to_none=True)
+    loss_4 = trainer._micro_step(batch)
+
+    # Same batch, same model weights → same unscaled loss
+    assert abs(loss_1 - loss_4) < 1e-6
+
+
+def test_grad_accum_accumulates_over_micro_batches(tmp_path, tokenizer, small_model):
+    """Calling _micro_step N times without zero_grad sums the scaled gradients."""
+    trainer = _make_trainer(tmp_path, tokenizer, small_model)
+    train_iter = iter(trainer.train_loader)
+    batch_a = next(train_iter)
+    batch_b = next(train_iter)
+
+    # Compute unscaled gradients for each batch individually
+    trainer.optimizer.zero_grad(set_to_none=True)
+    trainer._micro_step(batch_a)
+    grads_a = {
+        n: p.grad.clone()
+        for n, p in trainer.model.named_parameters()
+        if p.grad is not None
+    }
+
+    trainer.optimizer.zero_grad(set_to_none=True)
+    trainer._micro_step(batch_b)
+    grads_b = {
+        n: p.grad.clone()
+        for n, p in trainer.model.named_parameters()
+        if p.grad is not None
+    }
+
+    # Now accumulate both with grad_accum_steps=2
+    trainer.config.optim.grad_accum_steps = 2
+    trainer.optimizer.zero_grad(set_to_none=True)
+    trainer._micro_step(batch_a)
+    trainer._micro_step(batch_b)
+
+    # Accumulated gradient should equal mean of individual gradients
+    for name, p in trainer.model.named_parameters():
+        if p.grad is not None:
+            expected = (grads_a[name] + grads_b[name]) / 2
+            torch.testing.assert_close(p.grad, expected)
+
+
+def test_end_to_end_with_grad_accumulation(tmp_path, tokenizer):
+    """Training loop completes correctly with grad_accum_steps > 1."""
+    torch.manual_seed(42)
+    model = Decoder(
+        vocab_size=VOCAB_SIZE, d_model=D_MODEL, num_layers=NUM_LAYERS,
+        num_heads=NUM_HEADS, d_ff=D_FF, max_seq_len=MAX_SEQ_LEN, dropout=0.0,
+    )
+    (tmp_path / "train.txt").write_text(SAMPLE_TEXT)
+    config = TrainingConfig(
+        model=ModelConfig(
+            vocab_size=VOCAB_SIZE, d_model=D_MODEL, num_layers=NUM_LAYERS,
+            num_heads=NUM_HEADS, d_ff=D_FF, max_seq_len=MAX_SEQ_LEN,
+        ),
+        data=DataConfig(
+            train_path=str(tmp_path / "train.txt"),
+            tokenizer_path="", batch_size=BATCH_SIZE, seq_len=SEQ_LEN,
+        ),
+        optim=OptimConfig(lr=1e-3, warmup_steps=5, grad_accum_steps=2),
+        max_steps=10, eval_interval=5, log_interval=5, save_interval=10,
+        checkpoint_dir=str(tmp_path / "checkpoints"),
+        device="cpu", seed=42,
+    )
+    train_loader, val_loader = create_dataloaders(config.data, tokenizer)
+    trainer = Trainer(config, model, tokenizer, train_loader, val_loader)
+    trainer.train()
+
+    # global_step counts optimizer steps, not micro-steps
+    assert trainer.global_step == 10
+
+    run_dir = os.path.join(str(tmp_path / "checkpoints"), "run")
+    assert os.path.exists(os.path.join(run_dir, "checkpoint_latest.pt"))
 
 
 # ── Integration Test ─────────────────────────────────────────────────
