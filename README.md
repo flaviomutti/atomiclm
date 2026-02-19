@@ -139,9 +139,11 @@ uv run python scripts/generate.py checkpoints/run/checkpoint_latest.pt "Hello" 1
 
 ### 🔤 Tokenizer (`src/atomiclm/tokenizer/`)
 
-Byte Pair Encoding on raw bytes (base vocab = 256 byte tokens). Uses GPT-4's regex pre-split pattern to chunk text before merging — same design as tiktoken, so the split boundary doesn't contaminate merge statistics. Training is O(n log n) via a heap that tracks pair positions for incremental updates.
+**BPE on raw bytes.** The vocabulary starts as the 256 possible byte values — every UTF-8 string is representable with zero out-of-vocabulary tokens, no language-specific pre-processing required. Merging works on byte IDs, so multi-byte Unicode sequences are naturally handled.
 
-Key files:
+**Heap-based O(n log n) training.** The naive approach rescans the whole corpus to recount pair frequencies after every merge — O(n) per merge, O(n²) total. The heap variant tracks the exact positions of each pair and updates only the neighbours of every merged occurrence. Stale heap entries are discarded on pop (lazy deletion), keeping the heap bounded. Result: O(n log n) total time at the cost of O(n) extra memory for position sets.
+
+**Regex pre-split (GPT-4 pattern).** Before BPE, text is split into chunks by a Unicode-aware regex. Merges never cross chunk boundaries, so the tokenizer never learns spurious cross-boundary tokens — e.g. the `"."` after a word can't merge with the next word. Identical to tiktoken's design, which makes export trivial and the output directly comparable to GPT-4's tokenizer.
 
 | File | What it does |
 |------|-------------|
@@ -151,7 +153,19 @@ Key files:
 
 ### 🤖 Model (`src/atomiclm/model/`)
 
-LLaMA-style decoder-only transformer:
+LLaMA-style decoder-only transformer. Design rationale for each component:
+
+**RoPE (Rotary Position Embeddings).** Rather than adding absolute position vectors to embeddings, RoPE rotates Q and K by angles proportional to their position before the dot-product. The rotation is constructed so that `q_m · k_n` depends only on the relative offset `(m − n)`, giving the model a native sense of distance between tokens. Extrapolates better to sequence lengths beyond the training window than learned absolute positions.
+
+**GQA (Grouped Query Attention).** Standard MHA replicates K and V for every Q head, so KV-cache memory scales linearly with `num_heads`. GQA shares one KV head across a group of Q heads — `num_kv_heads` controls the group count. This reduces KV-cache size by `num_heads / num_kv_heads ×`, enabling larger batches or longer contexts with the same memory, at minimal quality cost vs. full MHA.
+
+**SwiGLU gated FFN.** Standard FFN: `W₂ · GELU(W₁ x)`. SwiGLU adds a learned gate: `W₂ · (SiLU(W₁ x) ⊙ W₃ x)`. The gate suppresses irrelevant activations dimension-by-dimension rather than leaving that to downstream layers, which empirically improves loss at equal parameter count. Used in LLaMA, PaLM, and most modern open models.
+
+**RMSNorm (pre-norm).** LayerNorm computes both mean and variance. RMSNorm drops the mean subtraction and only divides by the root-mean-square, which is slightly cheaper and equally effective empirically. Applied *before* each sub-layer (pre-norm) rather than after: this keeps activation scales bounded regardless of depth, stabilising gradient flow in deep networks.
+
+**KV-cache.** During autoregressive generation each new token only needs to attend to past keys and values — not recompute them. The cache accumulates K/V tensors step by step and appends the new token's projections, reducing generation from O(T²) to O(T) compute per step.
+
+**Weight-tied LM head.** The output projection (hidden state → vocabulary logits) shares its weight matrix with the input token embedding (token ID → hidden state). Reduces the parameter count by `vocab_size × d_model` — tens of millions for realistic settings — and creates a useful inductive bias: tokens that appear in similar contexts will have similar embeddings and similar output logit distributions.
 
 | Component | Details |
 |-----------|---------|
@@ -161,9 +175,11 @@ LLaMA-style decoder-only transformer:
 | Positional | Rotary embeddings (complex-number rotation, LLaMA style) |
 | LM head | Weight-tied with the token embedding matrix |
 
-KV-cache is wired up in `Decoder.generate()` so autoregressive decoding doesn't recompute past keys and values.
-
 ### 🏋️ Training (`src/atomiclm/training/`)
+
+**Gradient accumulation.** Effective batch size = `batch_size × grad_accum_steps`. Each optimizer step runs `grad_accum_steps` micro-batches, accumulates their gradients, then updates once. Mathematically identical to a single large batch — gradients are per-sample contributions that sum regardless of how the batch is chunked — but fits on hardware that can't hold the full batch in memory at once.
+
+**AdamW with separated weight decay.** Weight decay shrinks parameters toward zero at each step, acting as L2 regularisation on the weights. Applying it to biases, norm scale parameters, or embeddings is counterproductive — infrequent tokens would be pushed toward zero simply because they're rarely updated, not because they're overfit. Decay is therefore applied only to weight matrices (attention projections, FFN), matching standard practice from GPT-2 and LLaMA training.
 
 | Feature | Implementation |
 |---------|---------------|
