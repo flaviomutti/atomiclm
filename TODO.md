@@ -8,7 +8,7 @@
 ## Planned
 
 - Code data pipeline (The Stack / GitHub)
-- Gradient accumulation + AMP
+- AMP
 - RL fine-tuning (reward head, GRPO)
 - HuggingFace model/tokenizer export
 - Evaluation harness (HumanEval, lm-eval)
@@ -16,7 +16,7 @@
 
 ## Completed
 
-- Decoder-only transformer (GQA, RoPE, RMSNorm, SwiGLU, KV-cache, FlashAttention, weight tying)
+- Decoder-only transformer (GQA, RoPE, RMSNorm, SwiGLU, KV-cache, FlashAttention, weight tying, GA)
 - Training infrastructure (JSON config, AdamW with param grouping, cosine LR, checkpointing with RNG state)
 - BPE tokenizer (GPT-4 regex, heap-based O(n log n) training, iterator training, special tokens)
 - Tiktoken export
