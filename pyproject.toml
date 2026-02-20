@@ -6,7 +6,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 authors = [
-    { name = "Flavio" },
+    { name = "Flavio Mutti" },
 ]
 keywords = ["llm", "transformer", "bpe", "tokenizer", "pytorch", "from-scratch"]
 classifiers = [
@@ -19,9 +19,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "numpy<2",
     "regex>=2025.11.3",
-    "torch>=2.2.2",
+    "torch>=2.6.0; sys_platform == 'linux' or (sys_platform == 'darwin' and platform_machine == 'arm64')",
+    "torch==2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
 ]
 
 [project.optional-dependencies]
@@ -29,16 +29,20 @@ tiktoken = [
     "tiktoken>=0.12.0",
 ]
 
+[tool.uv]
+environments = [
+    "sys_platform == 'linux'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'darwin' and platform_machine == 'x86_64'",
+]
+
 [build-system]
 requires = ["uv_build>=0.9.21,<0.10.0"]
 build-backend = "uv_build"
 
-[tool.uv]
-required-environments = [
-    "sys_platform == 'darwin' and platform_machine == 'x86_64'",
-]
-
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "numpy<2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "numpy; sys_platform == 'linux' or (sys_platform == 'darwin' and platform_machine == 'arm64')",
 ]
